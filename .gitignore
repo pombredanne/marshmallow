@@ -23,16 +23,21 @@ pip-log.txt
 
 # Unit test / coverage reports
 .coverage
+htmlcov
 .tox
 nosetests.xml
+.cache
 
 # Translations
 *.mo
 
 # Mr Developer
 .mr.developer.cfg
+
+# IDE
 .project
 .pydevproject
+.idea
 
 # Coverage
 cover
@@ -50,3 +55,14 @@ Vagrantfile
 
 *.db
 *.ai
+.konchrc
+_sandbox
+pylintrc
+
+# Virtualenvs
+env
+venv
+
+# Other
+.directory
+

@@ -1,405 +1,784 @@
 # -*- coding: utf-8 -*-
-'''Field classes for formatting and validating the serialized object.
-'''
-# Adapted from https://github.com/twilio/flask-restful/blob/master/flask_restful/fields.py.
-# See the `NOTICE <https://github.com/sloria/marshmallow/blob/master/NOTICE>`_
-# file for more licensing information.
+"""Field classes for various types of data."""
 
-from __future__ import absolute_import
-from decimal import Decimal as MyDecimal, ROUND_HALF_EVEN
-from functools import wraps
-import inspect
+from __future__ import absolute_import, unicode_literals
 
-from marshmallow import validate, utils
-from marshmallow.base import FieldABC, SerializerABC
-from marshmallow.compat import (text_type, OrderedDict, iteritems, total_seconds,
-                                basestring)
-from marshmallow.exceptions import MarshallingError
+import collections
+import datetime as dt
+import uuid
+import warnings
+import decimal
+from operator import attrgetter
 
+from marshmallow import validate, utils, class_registry
+from marshmallow.base import FieldABC, SchemaABC
+from marshmallow.utils import missing as missing_
+from marshmallow.compat import text_type, basestring
+from marshmallow.exceptions import ValidationError
 
-def validated(f):
-    """Decorator that wraps a field's ``format`` or ``output`` method. If an
-    exception is raised during the execution of the wrapped method or the
-    field object's ``validate`` function evaluates to ``False``, a
-    MarshallingError is raised instead with the underlying exception's
-    error message or the user-defined error message (if defined).
-    """
-    @wraps(f)
-    def decorated(self, *args, **kwargs):
-        try:
-            output = f(self, *args, **kwargs)
-            if hasattr(self, 'validate') and callable(self.validate):
-                if not self.validate(output):
-                    msg = 'Validator {0}({1}) is not True'.format(
-                        self.validate.__name__, output
-                    )
-                    raise MarshallingError(getattr(self, "error", None) or msg)
-            return output
-        # TypeErrors should be raised if fields are not declared as instances
-        except TypeError:
-            raise
-        except Exception as error:
-            raise MarshallingError(getattr(self, "error", None) or error)
-    return decorated
+__all__ = [
+    'Field',
+    'Raw',
+    'Nested',
+    'Dict',
+    'List',
+    'String',
+    'UUID',
+    'Number',
+    'Integer',
+    'Decimal',
+    'Boolean',
+    'FormattedString',
+    'Float',
+    'DateTime',
+    'LocalDateTime',
+    'Time',
+    'Date',
+    'TimeDelta',
+    'Url',
+    'URL',
+    'Email',
+    'Method',
+    'Function',
+    'Str',
+    'Bool',
+    'Int',
+    'Constant',
+]
 
-
-class Marshaller(object):
-    '''Callable class responsible for marshalling data and storing errors.
-
-    :param str prefix: Optional prefix that will be prepended to all the
-        serialized field names.
-    :param bool strict: If ``True``, raise errors if invalid data are passed in
-        instead of failing silently and storing the errors.
-    '''
-    def __init__(self, prefix='', strict=False):
-        self.prefix = prefix
-        self.strict = strict
-        self.errors = {}
-
-    def marshal(self, data, fields_dict, many=False):
-        """Takes raw data (a dict, list, or other object) and a dict of
-        fields to output and filters the data based on those fields.
-
-        :param data: The actual object(s) from which the fields are taken from
-        :param dict fields: A dict whose keys will make up the final serialized
-                       response output.
-        :param bool many: Set to ``True`` if ``data`` is a collection object
-                        that is iterable.
-        :returns: An OrderedDict of the marshalled data
-        """
-        if many and data is not None:
-            return [self.marshal(d, fields_dict, many=False) for d in data]
-        items = []
-        for attr_name, field_obj in iteritems(fields_dict):
-            key = self.prefix + attr_name
-            try:
-                item = (key, field_obj.output(attr_name, data))
-            except MarshallingError as err:  # Store errors
-                if self.strict:
-                    raise err
-                self.errors[key] = text_type(err)
-                item = (key, None)
-            except TypeError:
-                # field declared as a class, not an instance
-                if isinstance(field_obj, type) and \
-                    issubclass(field_obj, FieldABC):
-                    msg = ('Field for "{0}" must be declared as a '
-                                    "Field instance, not a class. "
-                                    'Did you mean "fields.{1}()"?'
-                                    .format(attr_name, field_obj.__name__))
-                    raise TypeError(msg)
-                raise
-            items.append(item)
-        return OrderedDict(items)
-
-    # Make an instance callable
-    __call__ = marshal
-
-# Singleton marshaller function for use in this module
-marshal = Marshaller(strict=True)
+MISSING_ERROR_MESSAGE = (
+    'ValidationError raised by `{class_name}`, but error key `{key}` does '
+    'not exist in the `error_messages` dictionary.'
+)
+_RECURSIVE_NESTED = 'self'
 
 
-def _get_value(key, obj, default=None):
-    """Helper for pulling a keyed value off various types of objects"""
-    if type(key) == int:
-        return _get_value_for_key(key, obj, default)
-    else:
-        return _get_value_for_keys(key.split('.'), obj, default)
-
-
-def _get_value_for_keys(keys, obj, default):
-    if len(keys) == 1:
-        return _get_value_for_key(keys[0], obj, default)
-    else:
-        return _get_value_for_keys(
-            keys[1:], _get_value_for_key(keys[0], obj, default), default)
-
-
-def _get_value_for_key(key, obj, default):
-    if utils.is_indexable_but_not_string(obj):
-        try:
-            return obj[key]
-        except KeyError:
-            return default
-    if hasattr(obj, key):
-        return getattr(obj, key)
-    return default
-
-
-class Raw(FieldABC):
+class Field(FieldABC):
     """Basic field from which other fields should extend. It applies no
     formatting by default, and should only be used in cases where
-    data does not need to be formatted before being serialized. Fields should
-    throw a MarshallingError in case of parsing problem.
+    data does not need to be formatted before being serialized or deserialized.
+    On error, the name of the field will be returned.
 
-    :param default: Default value for the field if the attribute is not set.
+    :param default: If set, this value will be used during serialization if the input value
+        is missing. If not set, the field will be excluded from the serialized output if the
+        input value is missing. May be a value or a callable.
     :param str attribute: The name of the attribute to get the value from. If
-        ``None``, assumes the attribute has the same name as the field.
-    :param str error: Error message stored upon validation failure.
-    :param callable validate: Validation function that takes the output as its
-        only paramter and returns a boolean. If it returns False, a
-        MarshallingError is raised.
+        `None`, assumes the attribute has the same name as the field.
+    :param str load_from: Additional key to look for when deserializing. Will only
+        be checked if the field's name is not found on the input dictionary. If checked,
+        it will return this parameter on error.
+    :param str dump_to: Field name to use as a key when serializing.
+    :param callable validate: Validator or collection of validators that are called
+        during deserialization. Validator takes a field's input value as
+        its only parameter and returns a boolean.
+        If it returns `False`, an :exc:`ValidationError` is raised.
+    :param required: Raise a :exc:`ValidationError` if the field value
+        is not supplied during deserialization.
+    :param allow_none: Set this to `True` if `None` should be considered a valid value during
+        validation/deserialization. If ``missing=None`` and ``allow_none`` is unset,
+        will default to ``True``. Otherwise, the default is ``False``.
+    :param bool load_only: If `True` skip this field during serialization, otherwise
+        its value will be present in the serialized data.
+    :param bool dump_only: If `True` skip this field during deserialization, otherwise
+        its value will be present in the deserialized object. In the context of an
+        HTTP API, this effectively marks the field as "read-only".
+    :param missing: Default deserialization value for the field if the field is not
+        found in the input data. May be a value or a callable.
+    :param dict error_messages: Overrides for `Field.default_error_messages`.
+    :param metadata: Extra arguments to be stored as metadata.
+
+    .. versionchanged:: 2.0.0
+        Removed `error` parameter. Use ``error_messages`` instead.
+
+    .. versionchanged:: 2.0.0
+        Added `allow_none` parameter, which makes validation/deserialization of `None`
+        consistent across fields.
+
+    .. versionchanged:: 2.0.0
+        Added `load_only` and `dump_only` parameters, which allow field skipping
+        during the (de)serialization process.
+
+    .. versionchanged:: 2.0.0
+        Added `missing` parameter, which indicates the value for a field if the field
+        is not found during deserialization.
+
+    .. versionchanged:: 2.0.0
+        ``default`` value is only used if explicitly set. Otherwise, missing values
+        inputs are excluded from serialized output.
     """
+    # Some fields, such as Method fields and Function fields, are not expected
+    #  to exists as attributes on the objects to serialize. Set this to False
+    #  for those fields
+    _CHECK_ATTRIBUTE = True
+    _creation_index = 0  # Used for sorting
 
-    def __init__(self, default=None, attribute=None, error=None, validate=None):
-        self.attribute = attribute
+    #: Default error messages for various kinds of errors. The keys in this dictionary
+    #: are passed to `Field.fail`. The values are error messages passed to
+    #: :exc:`marshmallow.ValidationError`.
+    default_error_messages = {
+        'required': 'Missing data for required field.',
+        'type': 'Invalid input type.', # used by Unmarshaller
+        'null': 'Field may not be null.',
+        'validator_failed': 'Invalid value.'
+    }
+
+    def __init__(self, default=missing_, attribute=None, load_from=None, dump_to=None,
+                 error=None, validate=None, required=False, allow_none=None, load_only=False,
+                 dump_only=False, missing=missing_, error_messages=None, **metadata):
         self.default = default
-        self.error = error
+        self.attribute = attribute
+        self.load_from = load_from  # this flag is used by Unmarshaller
+        self.dump_to = dump_to  # this flag is used by Marshaller
         self.validate = validate
+        if utils.is_iterable_but_not_string(validate):
+            if not utils.is_generator(validate):
+                self.validators = validate
+            else:
+                self.validators = list(validate)
+        elif callable(validate):
+            self.validators = [validate]
+        elif validate is None:
+            self.validators = []
+        else:
+            raise ValueError("The 'validate' parameter must be a callable "
+                             "or a collection of callables.")
 
-    def get_value(self, key, obj):
-        '''Return the value for a given key from an object.'''
-        return _get_value(key if self.attribute is None else self.attribute, obj)
+        self.required = required
+        # If missing=None, None should be considered valid by default
+        if allow_none is None:
+            if missing is None:
+                self.allow_none = True
+            else:
+                self.allow_none = False
+        else:
+            self.allow_none = allow_none
+        self.load_only = load_only
+        self.dump_only = dump_only
+        self.missing = missing
+        self.metadata = metadata
+        self._creation_index = Field._creation_index
+        Field._creation_index += 1
 
-    def format(self, value):
-        """Formats a field's value. No-op by default, concrete fields should
-        override this and apply the appropriate formatting.
+        # Collect default error message from self and parent classes
+        messages = {}
+        for cls in reversed(self.__class__.__mro__):
+            messages.update(getattr(cls, 'default_error_messages', {}))
+        messages.update(error_messages or {})
+        self.error_messages = messages
 
-        :param value: The value to format
-        :exception MarshallingError: In case of formatting problem
+    def __repr__(self):
+        return ('<fields.{ClassName}(default={self.default!r}, '
+                'attribute={self.attribute!r}, '
+                'validate={self.validate}, required={self.required}, '
+                'load_only={self.load_only}, dump_only={self.dump_only}, '
+                'missing={self.missing}, allow_none={self.allow_none}, '
+                'error_messages={self.error_messages})>'
+                .format(ClassName=self.__class__.__name__, self=self))
 
-        Ex::
+    def get_value(self, attr, obj, accessor=None, default=missing_):
+        """Return the value for a given key from an object."""
+        # NOTE: Use getattr instead of direct attribute access here so that
+        # subclasses aren't required to define `attribute` member
+        attribute = getattr(self, 'attribute', None)
+        accessor_func = accessor or utils.get_value
+        check_key = attr if attribute is None else attribute
+        return accessor_func(check_key, obj, default)
 
-            class TitleCase(Raw):
-                def format(self, value):
+    def _validate(self, value):
+        """Perform validation on ``value``. Raise a :exc:`ValidationError` if validation
+        does not succeed.
+        """
+        errors = []
+        kwargs = {}
+        for validator in self.validators:
+            try:
+                if validator(value) is False:
+                    self.fail('validator_failed')
+            except ValidationError as err:
+                kwargs.update(err.kwargs)
+                if isinstance(err.messages, dict):
+                    errors.append(err.messages)
+                else:
+                    errors.extend(err.messages)
+        if errors:
+            raise ValidationError(errors, **kwargs)
+
+    # Hat tip to django-rest-framework.
+    def fail(self, key, **kwargs):
+        """A helper method that simply raises a `ValidationError`.
+        """
+        try:
+            msg = self.error_messages[key]
+        except KeyError:
+            class_name = self.__class__.__name__
+            msg = MISSING_ERROR_MESSAGE.format(class_name=class_name, key=key)
+            raise AssertionError(msg)
+        if isinstance(msg, basestring):
+            msg = msg.format(**kwargs)
+        raise ValidationError(msg)
+
+    def _validate_missing(self, value):
+        """Validate missing values. Raise a :exc:`ValidationError` if
+        `value` should be considered missing.
+        """
+        if value is missing_:
+            if hasattr(self, 'required') and self.required:
+                self.fail('required')
+        if value is None:
+            if hasattr(self, 'allow_none') and self.allow_none is not True:
+                self.fail('null')
+
+    def serialize(self, attr, obj, accessor=None):
+        """Pulls the value for the given key from the object, applies the
+        field's formatting and returns the result.
+
+        :param str attr: The attibute or key to get from the object.
+        :param str obj: The object to pull the key from.
+        :param callable accessor: Function used to pull values from ``obj``.
+        :raise ValidationError: In case of formatting problem
+        """
+        if self._CHECK_ATTRIBUTE:
+            value = self.get_value(attr, obj, accessor=accessor)
+            if value is missing_:
+                if hasattr(self, 'default'):
+                    if callable(self.default):
+                        return self.default()
+                    else:
+                        return self.default
+        else:
+            value = None
+        return self._serialize(value, attr, obj)
+
+    def deserialize(self, value, attr=None, data=None):
+        """Deserialize ``value``.
+
+        :raise ValidationError: If an invalid value is passed or if a required value
+            is missing.
+        """
+        # Validate required fields, deserialize, then validate
+        # deserialized value
+        self._validate_missing(value)
+        if getattr(self, 'allow_none', False) is True and value is None:
+            return None
+        output = self._deserialize(value, attr, data)
+        self._validate(output)
+        return output
+
+    # Methods for concrete classes to override.
+
+    def _add_to_schema(self, field_name, schema):
+        """Update field with values from its parent schema. Called by
+            :meth:`__set_field_attrs <marshmallow.Schema.__set_field_attrs>`.
+
+        :param str field_name: Field name set in schema.
+        :param Schema schema: Parent schema.
+        """
+        self.parent = self.parent or schema
+        self.name = self.name or field_name
+
+    def _serialize(self, value, attr, obj):
+        """Serializes ``value`` to a basic Python datatype. Noop by default.
+        Concrete :class:`Field` classes should implement this method.
+
+        Example: ::
+
+            class TitleCase(Field):
+                def _serialize(self, value, attr, obj):
+                    if not value:
+                        return ''
                     return unicode(value).title()
+
+        :param value: The value to be serialized.
+        :param str attr: The attribute or key on the object to be serialized.
+        :param object obj: The object the value was pulled from.
+        :raise ValidationError: In case of formatting or validation failure.
+        :return: The serialized value
         """
         return value
 
-    @validated
-    def output(self, key, obj):
-        """Pulls the value for the given key from the object, applies the
-        field's formatting and returns the result.
-        :exception MarshallingError: In case of formatting problem
+    def _deserialize(self, value, attr, data):
+        """Deserialize value. Concrete :class:`Field` classes should implement this method.
+
+        :param value: The value to be deserialized.
+        :param str attr: The attribute/key in `data` to be deserialized.
+        :param dict data: The raw input data passed to the `Schema.load`.
+        :raise ValidationError: In case of formatting or validation failure.
+        :return: The deserialized value.
+
+        .. versionchanged:: 2.0.0
+            Added ``attr`` and ``data`` parameters.
         """
-        value = self.get_value(key, obj)
-        if value is None:
-            return self.default
-        return self.format(value)
+        return value
 
+    # Properties
 
-class Nested(Raw):
-    """Allows you to nest a :class:`Serializer <marshmallow.Serializer>`
+    @property
+    def context(self):
+        """The context dictionary for the parent :class:`Schema`."""
+        return self.parent.context
+
+    @property
+    def root(self):
+        """Reference to the `Schema` that this field belongs to even if it is buried in a `List`."""
+        ret = self
+        while hasattr(ret, 'parent') and ret.parent:
+            ret = ret.parent
+        return ret
+
+class Raw(Field):
+    """Field that applies no formatting or validation."""
+    pass
+
+class Nested(Field):
+    """Allows you to nest a :class:`Schema <marshmallow.Schema>`
     inside a field.
 
     Examples: ::
 
-        user = fields.Nested(UserSerializer)
-        collaborators = fields.Nested(UserSerializer, many=True, only='id')
+        user = fields.Nested(UserSchema)
+        user2 = fields.Nested('UserSchema')  # Equivalent to above
+        collaborators = fields.Nested(UserSchema, many=True, only='id')
         parent = fields.Nested('self')
 
-    :param Serializer nested: The Serializer class or instance to nest, or
-        "self" to nest the serializer within itself.
+    :param Schema nested: The Schema class or class name (string)
+        to nest, or ``"self"`` to nest the :class:`Schema` within itself.
+    :param default: Default value to if attribute is missing or None
     :param tuple exclude: A list or tuple of fields to exclude.
-    :param only: A tuple or string of the field(s) to marshal. If ``None``, all fields
+    :param required: Raise an :exc:`ValidationError` during deserialization
+        if the field, *and* any required field values specified
+        in the `nested` schema, are not found in the data. If not a `bool`
+        (e.g. a `str`), the provided value will be used as the message of the
+        :exc:`ValidationError` instead of the default message.
+    :param only: A tuple or string of the field(s) to marshal. If `None`, all fields
         will be marshalled. If a field name (string) is given, only a single
         value will be returned as output instead of a dictionary.
         This parameter takes precedence over ``exclude``.
-    :param bool allow_null: Whether to return None instead of a dictionary
-        with null keys, if a nested dictionary has all-null keys
     :param bool many: Whether the field is a collection of objects.
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
     """
 
-    def __init__(self, nested, exclude=None, only=None, allow_null=False,
-                many=False, **kwargs):
-        self.nested = nested
-        self.allow_null = allow_null
-        self.only = only
-        self.exclude = exclude or ()
-        self.many = many
-        self.__serializer = None
-        self.__updated_fields = False  # ensures serializer fields are updated
-                                        # only once
-        super(Nested, self).__init__(**kwargs)
+    default_error_messages = {
+        'type': 'Invalid type.',
+    }
 
-    def __get_fields_to_marshal(self, all_fields):
-        '''Filter all_fields based on self.only and self.exclude.'''
-        # Default 'only' to all the nested fields
-        ret = OrderedDict()
-        if all_fields is None:
-            return ret
-        elif isinstance(self.only, basestring):
-            ret[self.only] = all_fields[self.only]
-            return ret
-        else:
-            only = set(all_fields) if self.only is None else set(self.only)
-        if self.exclude and self.only:
-            # Make sure that only takes precedence
-            exclude = set(self.exclude) - only
-        else:
-            exclude = set([]) if self.exclude is None else set(self.exclude)
-        filtered = ((k, v) for k, v in all_fields.items()
-                    if k in only and k not in exclude)
-        return OrderedDict(filtered)
+    def __init__(self, nested, default=missing_, exclude=tuple(), only=None, **kwargs):
+        self.nested = nested
+        self.only = only
+        self.exclude = exclude
+        self.many = kwargs.get('many', False)
+        self.__schema = None  # Cached Schema instance
+        self.__updated_fields = False
+        super(Nested, self).__init__(default=default, **kwargs)
 
     @property
-    def serializer(self):
-        """The nested Serializer object."""
-        # Cache the serializer instance
-        if not self.__serializer:
-            if isinstance(self.nested, SerializerABC):
-                self.__serializer = self.nested
-            elif isinstance(self.nested, type) and \
-                    issubclass(self.nested, SerializerABC):
-                self.__serializer = self.nested(None, many=self.many)
-            elif self.nested == 'self':
-                self.__serializer = self.parent  # The serializer this fields belongs to
-                # For now, don't allow nesting of depth > 1
-                self.exclude += (self.name, )  # Exclude this field
-            else:
-                raise ValueError("Nested fields must be passed a Serializer, not {0}."
-                                .format(self.nested.__class__))
-        return self.__serializer
+    def schema(self):
+        """The nested Schema object.
 
-    def output(self, key, obj):
-        nested_obj = self.get_value(key, obj)
-        if self.allow_null and nested_obj is None:
+        .. versionchanged:: 1.0.0
+            Renamed from `serializer` to `schema`
+        """
+        # Ensure that only parameter is a tuple
+        if isinstance(self.only, basestring):
+            only = (self.only, )
+        else:
+            only = self.only
+
+        # Inherit context from parent.
+        context = getattr(self.parent, 'context', {})
+        if not self.__schema:
+            if isinstance(self.nested, SchemaABC):
+                self.__schema = self.nested
+                self.__schema.context.update(context)
+            elif isinstance(self.nested, type) and \
+                    issubclass(self.nested, SchemaABC):
+                self.__schema = self.nested(many=self.many,
+                        only=only, exclude=self.exclude, context=context)
+            elif isinstance(self.nested, basestring):
+                if self.nested == _RECURSIVE_NESTED:
+                    parent_class = self.parent.__class__
+                    self.__schema = parent_class(many=self.many, only=only,
+                            exclude=self.exclude, context=context)
+                else:
+                    schema_class = class_registry.get_class(self.nested)
+                    self.__schema = schema_class(many=self.many,
+                            only=only, exclude=self.exclude, context=context)
+            else:
+                raise ValueError('Nested fields must be passed a '
+                                 'Schema, not {0}.'.format(self.nested.__class__))
+        self.__schema.ordered = getattr(self.parent, 'ordered', False)
+        return self.__schema
+
+    def _serialize(self, nested_obj, attr, obj):
+        # Load up the schema first. This allows a RegistryError to be raised
+        # if an invalid schema name was passed
+        schema = self.schema
+        if nested_obj is None:
             return None
-        self.serializer.many = self.many
-        self.serializer.obj = nested_obj
         if not self.__updated_fields:
+            schema._update_fields(obj=nested_obj, many=self.many)
             self.__updated_fields = True
-            self.serializer._update_fields(nested_obj)
-        fields = self.__get_fields_to_marshal(self.serializer.fields)
-        ret = self.serializer.marshal(nested_obj, fields, many=self.many)
-        # Parent should get any errors stored after marshalling
-        if self.serializer.errors:
-            self.parent.errors[key] = self.serializer.errors
+        ret = schema.dump(nested_obj, many=self.many,
+                update_fields=not self.__updated_fields).data
         if isinstance(self.only, basestring):  # self.only is a field name
             if self.many:
-                return flatten(ret, key=self.only)
+                return utils.pluck(ret, key=self.only)
             else:
                 return ret[self.only]
         return ret
 
+    def _deserialize(self, value, attr, data):
+        if self.many and not utils.is_collection(value):
+            self.fail('type', input=value, type=value.__class__.__name__)
 
-def flatten(dictlist, key):
-    """Flattens a list of dicts into just a list of values.
-    ::
+        data, errors = self.schema.load(value)
+        if errors:
+            raise ValidationError(errors, data=data)
+        return data
 
-        >>> d = [{'id': 1, 'name': 'foo'}, {'id': 2, 'name': 'bar'}]
-        >>> flatten(d, 'id')
-        [1, 2]
-    """
-    return [d[key] for d in dictlist]
+    def _validate_missing(self, value):
+        """Validate missing values. Raise a :exc:`ValidationError` if
+        `value` should be considered missing.
+        """
+        if value is missing_ and hasattr(self, 'required'):
+            if self.nested == _RECURSIVE_NESTED:
+                self.fail('required')
+            errors = self._check_required()
+            if errors:
+                raise ValidationError(errors)
+        else:
+            super(Nested, self)._validate_missing(value)
+
+    def _check_required(self):
+        errors = {}
+        if self.required:
+            for field_name, field in self.schema.fields.items():
+                if not field.required:
+                    continue
+                error_field_name = field.load_from or field_name
+                if (
+                    isinstance(field, Nested) and
+                    self.nested != _RECURSIVE_NESTED and
+                    field.nested != _RECURSIVE_NESTED
+                ):
+                    errors[error_field_name] = field._check_required()
+                else:
+                    try:
+                        field._validate_missing(field.missing)
+                    except ValidationError as ve:
+                        errors[error_field_name] = ve.messages
+            if self.many and errors:
+                errors = {0: errors}
+            # No inner errors; just raise required error like normal
+            if not errors:
+                self.fail('required')
+        return errors
 
 
-class List(Raw):
-    '''A list field.
+class List(Field):
+    """A list field, composed with another `Field` class or
+    instance.
 
     Example: ::
 
-        numbers = fields.List(fields.Float)
+        numbers = fields.List(fields.Float())
 
-    :param cls_or_instance: A field class or instance.
-    '''
+    :param Field cls_or_instance: A field class or instance.
+    :param bool default: Default value for serialization.
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
+
+    .. versionchanged:: 2.0.0
+        The ``allow_none`` parameter now applies to deserialization and
+        has the same semantics as the other fields.
+    """
+    default_error_messages = {
+        'invalid': 'Not a valid list.',
+    }
+
     def __init__(self, cls_or_instance, **kwargs):
         super(List, self).__init__(**kwargs)
         if isinstance(cls_or_instance, type):
             if not issubclass(cls_or_instance, FieldABC):
-                raise MarshallingError("The type of the list elements "
-                                           "must be a subclass of "
-                                           "marshmallow.base.FieldABC")
+                raise ValueError('The type of the list elements '
+                                           'must be a subclass of '
+                                           'marshmallow.base.FieldABC')
             self.container = cls_or_instance()
         else:
             if not isinstance(cls_or_instance, FieldABC):
-                raise MarshallingError("The instances of the list "
-                                           "elements must be of type "
-                                           "marshmallow.base.FieldABC")
+                raise ValueError('The instances of the list '
+                                           'elements must be of type '
+                                           'marshmallow.base.FieldABC')
             self.container = cls_or_instance
 
-    def output(self, key, data):
-        value = self.get_value(key, data)
-        # we cannot really test for external dict behavior
-        if utils.is_indexable_but_not_string(value) and not isinstance(value, dict):
-            # Convert all instances in typed list to container type
-            return [self.container.output(idx, value) for idx
-                    in range(len(value))]
+    def get_value(self, attr, obj, accessor=None):
+        """Return the value for a given key from an object."""
+        value = super(List, self).get_value(attr, obj, accessor=accessor)
+        if self.container.attribute:
+            if utils.is_collection(value):
+                return [
+                    self.container.get_value(self.container.attribute, each)
+                    for each in value
+                ]
+            return self.container.get_value(self.container.attribute, value)
+        return value
 
+    def _add_to_schema(self, field_name, schema):
+        super(List, self)._add_to_schema(field_name, schema)
+        self.container.parent = self
+        self.container.name = field_name
+
+    def _serialize(self, value, attr, obj):
         if value is None:
-            return self.default
+            return None
+        if utils.is_collection(value):
+            return [self.container._serialize(each, attr, obj) for each in value]
+        return [self.container._serialize(value, attr, obj)]
 
-        return [marshal(value, self.container.nested)]
+    def _deserialize(self, value, attr, data):
+        if not utils.is_collection(value):
+            self.fail('invalid')
 
+        result = []
+        errors = {}
+        for idx, each in enumerate(value):
+            try:
+                result.append(self.container.deserialize(each))
+            except ValidationError as e:
+                result.append(e.data)
+                errors.update({idx: e.messages})
 
-class String(Raw):
-    """A string field."""
+        if errors:
+            raise ValidationError(errors, data=result)
 
-    def __init__(self, default='', attribute=None,  *args, **kwargs):
-        return super(String, self).__init__(default, attribute, *args, **kwargs)
+        return result
 
-    @validated
-    def format(self, value):
-        try:
-            return text_type(value)
-        except ValueError as ve:
-            raise MarshallingError(self.error or ve)
+class String(Field):
+    """A string field.
+
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
+    """
+
+    default_error_messages = {
+        'invalid': 'Not a valid string.'
+    }
+
+    def __init__(self, *args, **kwargs):
+        return super(String, self).__init__(*args, **kwargs)
+
+    def _serialize(self, value, attr, obj):
+        if value is None:
+            return None
+        return utils.ensure_text_type(value)
+
+    def _deserialize(self, value, attr, data):
+        if not isinstance(value, basestring):
+            self.fail('invalid')
+        return utils.ensure_text_type(value)
 
 
 class UUID(String):
     """A UUID field."""
-    pass
+    default_error_messages = {
+        'invalid_uuid': 'Not a valid UUID.',
+        'invalid_guid': 'Not a valid UUID.'  # TODO: Remove this in marshmallow 3.0
+    }
+
+    def _deserialize(self, value, attr, data):
+        try:
+            return uuid.UUID(value)
+        except (ValueError, AttributeError):
+            self.fail('invalid_uuid')
 
 
-class Number(Raw):
-    '''Base class for number fields.'''
+class Number(Field):
+    """Base class for number fields.
+
+    :param bool as_string: If True, format the serialized value as a string.
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
+    """
 
     num_type = float
+    default_error_messages = {
+        'invalid': 'Not a valid number.'
+    }
 
-    def __init__(self, default=0.0, attribute=None, as_string=False, error=None, **kwargs):
+    def __init__(self, as_string=False, **kwargs):
         self.as_string = as_string
-        super(Number, self).__init__(default=default, attribute=attribute,
-            error=error, **kwargs)
+        super(Number, self).__init__(**kwargs)
 
     def _format_num(self, value):
-        '''Return the correct value for a number, given the passed in
-        arguments to __init__.
-        '''
-        if self.as_string:
-            return repr(self.num_type(value))
-        else:
-            return self.num_type(value)
+        """Return the number value for value, given this field's `num_type`."""
+        if value is None:
+            return None
+        return self.num_type(value)
 
-    @validated
-    def format(self, value):
+    def _validated(self, value):
+        """Format the value or raise a :exc:`ValidationError` if an error occurs."""
         try:
-            if value is None:
-                return self._format_num(self.default)
             return self._format_num(value)
-        except ValueError as ve:
-            raise MarshallingError(ve)
+        except (TypeError, ValueError) as err:
+            self.fail('invalid')
+
+    def serialize(self, attr, obj, accessor=None):
+        """Pulls the value for the given key from the object and returns the
+        serialized number representation. Return a string if `self.as_string=True`,
+        othewise return this field's `num_type`. Receives the same `args` and `kwargs`
+        as `Field`.
+        """
+        ret = Field.serialize(self, attr, obj, accessor=accessor)
+        return str(ret) if (self.as_string and ret is not None) else ret
+
+    def _serialize(self, value, attr, obj):
+        return self._validated(value)
+
+    def _deserialize(self, value, attr, data):
+        return self._validated(value)
 
 
 class Integer(Number):
     """An integer field.
 
-    :param bool as_string: If True, format the value as a string.
+    :param kwargs: The same keyword arguments that :class:`Number` receives.
     """
 
     num_type = int
+    default_error_messages = {
+        'invalid': 'Not a valid integer.'
+    }
 
-    def __init__(self, default=0, attribute=None, as_string=False, error=None, **kwargs):
-        self.as_string = as_string
-        super(Number, self).__init__(default=default, attribute=attribute,
-            error=error, **kwargs)
 
-class Boolean(Raw):
-    '''A boolean field.'''
-    def format(self, value):
+class Decimal(Number):
+    """A field that (de)serializes to the Python ``decimal.Decimal`` type.
+    It's safe to use when dealing with money values, percentages, ratios
+    or other numbers where precision is critical.
+
+    .. warning::
+
+        This field serializes to a `decimal.Decimal` object by default. If you need
+        to render your data as JSON, keep in mind that the `json` module from the
+        standard library does not encode `decimal.Decimal`. Therefore, you must use
+        a JSON library that can handle decimals, such as `simplejson`, or serialize
+        to a string by passing ``as_string=True``.
+
+    :param int places: How many decimal places to quantize the value. If `None`, does
+        not quantize the value.
+    :param rounding: How to round the value during quantize, for example
+        `decimal.ROUND_UP`. If None, uses the rounding value from
+        the current thread's context.
+    :param bool allow_nan: If `True`, `NaN`, `Infinity` and `-Infinity` are allowed,
+        even though they are illegal according to the JSON specification.
+    :param bool as_string: If True, serialize to a string instead of a Python
+        `decimal.Decimal` type.
+    :param kwargs: The same keyword arguments that :class:`Number` receives.
+
+    .. versionadded:: 1.2.0
+    """
+
+    num_type = decimal.Decimal
+
+    default_error_messages = {
+        'special': 'Special numeric values are not permitted.',
+    }
+
+    def __init__(self, places=None, rounding=None, allow_nan=False, as_string=False, **kwargs):
+        self.places = decimal.Decimal((0, (1,), -places)) if places is not None else None
+        self.rounding = rounding
+        self.allow_nan = allow_nan
+        super(Decimal, self).__init__(as_string=as_string, **kwargs)
+
+    # override Number
+    def _format_num(self, value):
+        if value is None:
+            return None
+
+        num = decimal.Decimal(value)
+
+        if self.allow_nan:
+            if num.is_nan():
+                return decimal.Decimal('NaN')  # avoid sNaN, -sNaN and -NaN
+        else:
+            if num.is_nan() or num.is_infinite():
+                self.fail('special')
+
+        if self.places is not None and num.is_finite():
+            num = num.quantize(self.places, rounding=self.rounding)
+
+        return num
+
+    # override Number
+    def _validated(self, value):
+        try:
+            return super(Decimal, self)._validated(value)
+        except decimal.InvalidOperation:
+            self.fail('invalid')
+
+
+class Boolean(Field):
+    """A boolean field.
+
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
+    """
+    #: Values that will (de)serialize to `True`. If an empty set, any non-falsy
+    #  value will deserialize to `True`.
+    truthy = set(('t', 'T', 'true', 'True', 'TRUE', '1', 1, True))
+    #: Values that will (de)serialize to `False`.
+    falsy = set(('f', 'F', 'false', 'False', 'FALSE', '0', 0, 0.0, False))
+
+    default_error_messages = {
+        'invalid': 'Not a valid boolean.'
+    }
+
+    def _serialize(self, value, attr, obj):
+        if value is None:
+            return None
+        elif value in self.truthy:
+            return True
+        elif value in self.falsy:
+            return False
+
         return bool(value)
 
+    def _deserialize(self, value, attr, data):
+        if not self.truthy:
+            return bool(value)
+        else:
+            try:
+                if value in self.truthy:
+                    return True
+                elif value in self.falsy:
+                    return False
+            except TypeError:
+                pass
+        self.fail('invalid')
 
-class FormattedString(Raw):
-    def __init__(self, src_str):
-        super(FormattedString, self).__init__()
+class FormattedString(Field):
+    """Interpolate other values from the object into this field. The syntax for
+    the source string is the same as the string `str.format` method
+    from the python stdlib.
+    ::
+
+        class UserSchema(Schema):
+            name = fields.String()
+            greeting = fields.FormattedString('Hello {name}')
+
+        ser = UserSchema()
+        res = ser.dump(user)
+        res.data  # => {'name': 'Monty', 'greeting': 'Hello Monty'}
+    """
+    default_error_messages = {
+        'format': 'Cannot format string with given data.'
+    }
+    _CHECK_ATTRIBUTE = False
+
+    def __init__(self, src_str, *args, **kwargs):
+        Field.__init__(self, *args, **kwargs)
         self.src_str = text_type(src_str)
 
-    def output(self, key, obj):
+    def _serialize(self, value, attr, obj):
         try:
             data = utils.to_marshallable_type(obj)
             return self.src_str.format(**data)
         except (TypeError, IndexError) as error:
-            raise MarshallingError(error)
+            self.fail('format')
 
 
 class Float(Number):
@@ -407,60 +786,98 @@ class Float(Number):
     A double as IEEE-754 double precision string.
 
     :param bool as_string: If True, format the value as a string.
+    :param kwargs: The same keyword arguments that :class:`Number` receives.
     """
 
     num_type = float
 
 
-class Arbitrary(Number):
-    """A floating point number with an arbitrary precision,
-    formatted as as string.
-    ex: 634271127864378216478362784632784678324.23432
-    """
-    # No as_string param
-    def __init__(self, default=0, attribute=None, **kwargs):
-        super(Arbitrary, self).__init__(default=default, attribute=attribute, **kwargs)
-
-    @validated
-    def format(self, value):
-        try:
-            if value is None:
-                return text_type(utils.float_to_decimal(float(self.default)))
-            return text_type(utils.float_to_decimal(float(value)))
-        except ValueError as ve:
-            raise MarshallingError(ve)
-
-DATEFORMAT_FUNCTIONS = {
-    "iso": utils.isoformat,
-    "rfc": utils.rfcformat,
-}
-
-
-class DateTime(Raw):
+class DateTime(Field):
     """A formatted datetime string in UTC.
-        ex. ``"Sun, 10 Nov 2013 07:23:45 -0000"``
+
+    Example: ``'2014-12-22T03:12:58.019077+00:00'``
+
+    Timezone-naive `datetime` objects are converted to
+    UTC (+00:00) by :meth:`Schema.dump <marshmallow.Schema.dump>`.
+    :meth:`Schema.load <marshmallow.Schema.load>` returns `datetime`
+    objects that are timezone-aware.
 
     :param str format: Either ``"rfc"`` (for RFC822), ``"iso"`` (for ISO8601),
-        or a date format string. If ``None``, defaults to "rfc".
-    :param default: Default value for the field if the attribute is not set.
-    :param str attribute: The name of the attribute to get the value from. If
-        ``None``, assumes the attribute has the same name as the field.
+        or a date format string. If `None`, defaults to "iso".
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
 
     """
-    localtime = False
 
-    def __init__(self, format=None, default=None, attribute=None, **kwargs):
-        super(DateTime, self).__init__(default=default, attribute=attribute, **kwargs)
+    DATEFORMAT_SERIALIZATION_FUNCS = {
+        'iso': utils.isoformat,
+        'iso8601': utils.isoformat,
+        'rfc': utils.rfcformat,
+        'rfc822': utils.rfcformat,
+    }
+
+    DATEFORMAT_DESERIALIZATION_FUNCS = {
+        'iso': utils.from_iso,
+        'iso8601': utils.from_iso,
+        'rfc': utils.from_rfc,
+        'rfc822': utils.from_rfc,
+    }
+
+    DEFAULT_FORMAT = 'iso'
+
+    localtime = False
+    default_error_messages = {
+        'invalid': 'Not a valid datetime.',
+        'format': '"{input}" cannot be formatted as a datetime.',
+    }
+
+    def __init__(self, format=None, **kwargs):
+        super(DateTime, self).__init__(**kwargs)
+        # Allow this to be None. It may be set later in the ``_serialize``
+        # or ``_desrialize`` methods This allows a Schema to dynamically set the
+        # dateformat, e.g. from a Meta option
         self.dateformat = format
 
-    @validated
-    def format(self, value):
-        self.dateformat = self.dateformat or 'rfc'
-        format_func = DATEFORMAT_FUNCTIONS.get(self.dateformat, None)
+    def _add_to_schema(self, field_name, schema):
+        super(DateTime, self)._add_to_schema(field_name, schema)
+        self.dateformat = self.dateformat or schema.opts.dateformat
+
+    def _serialize(self, value, attr, obj):
+        if value is None:
+            return None
+        self.dateformat = self.dateformat or self.DEFAULT_FORMAT
+        format_func = self.DATEFORMAT_SERIALIZATION_FUNCS.get(self.dateformat, None)
         if format_func:
-            return format_func(value, localtime=self.localtime)
+            try:
+                return format_func(value, localtime=self.localtime)
+            except (AttributeError, ValueError) as err:
+                self.fail('format', input=value)
         else:
             return value.strftime(self.dateformat)
+
+    def _deserialize(self, value, attr, data):
+        if not value:  # Falsy values, e.g. '', None, [] are not valid
+            raise self.fail('invalid')
+        self.dateformat = self.dateformat or self.DEFAULT_FORMAT
+        func = self.DATEFORMAT_DESERIALIZATION_FUNCS.get(self.dateformat)
+        if func:
+            try:
+                return func(value)
+            except (TypeError, AttributeError, ValueError):
+                raise self.fail('invalid')
+        elif self.dateformat:
+            try:
+                return dt.datetime.strptime(value, self.dateformat)
+            except (TypeError, AttributeError, ValueError):
+                raise self.fail('invalid')
+        elif utils.dateutil_available:
+            try:
+                return utils.from_datestring(value)
+            except TypeError:
+                raise self.fail('invalid')
+        else:
+            warnings.warn('It is recommended that you install python-dateutil '
+                          'for improved datetime deserialization.')
+            raise self.fail('invalid')
 
 
 class LocalDateTime(DateTime):
@@ -473,190 +890,352 @@ class LocalDateTime(DateTime):
     localtime = True
 
 
-class Time(Raw):
-    """ISO8601-formatted time string."""
+class Time(Field):
+    """ISO8601-formatted time string.
 
-    @validated
-    def format(self, value):
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
+    """
+    default_error_messages = {
+        'invalid': 'Not a valid time.',
+        'format': '"{input}" cannot be formatted as a time.',
+    }
+
+    def _serialize(self, value, attr, obj):
+        if value is None:
+            return None
         try:
             ret = value.isoformat()
         except AttributeError:
-            raise MarshallingError('{0} cannot be formatted as a time.'
-                                    .format(repr(value)))
+            self.fail('format', input=value)
         if value.microsecond:
             return ret[:12]
         return ret
 
+    def _deserialize(self, value, attr, data):
+        """Deserialize an ISO8601-formatted time to a :class:`datetime.time` object."""
+        if not value:   # falsy values are invalid
+            self.fail('invalid')
+            raise err
+        try:
+            return utils.from_iso_time(value)
+        except (AttributeError, TypeError, ValueError):
+            self.fail('invalid')
 
-class Date(Raw):
-    """ISO8601-formatted date string."""
+class Date(Field):
+    """ISO8601-formatted date string.
 
-    @validated
-    def format(self, value):
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
+    """
+    default_error_messages = {
+        'invalid': 'Not a valid date.',
+        'format': '"{input}" cannot be formatted as a date.',
+    }
+
+    def _serialize(self, value, attr, obj):
+        if value is None:
+            return None
         try:
             return value.isoformat()
         except AttributeError:
-            raise MarshallingError('{0} cannot be formatted as a date.'
-                                    .format(repr(value)))
+            self.fail('format', input=value)
         return value
 
-
-class TimeDelta(Raw):
-    '''Formats time delta objects, returning the total number of seconds
-    as a float.
-    '''
-
-    @validated
-    def format(self, value):
+    def _deserialize(self, value, attr, data):
+        """Deserialize an ISO8601-formatted date string to a
+        :class:`datetime.date` object.
+        """
+        if not value:  # falsy values are invalid
+            self.fail('invalid')
         try:
-            return total_seconds(value)
-        except AttributeError:
-            raise MarshallingError('{0} cannot be formatted as a timedelta.'
-                                    .format(repr(value)))
-        return value
+            return utils.from_iso_date(value)
+        except (AttributeError, TypeError, ValueError):
+            self.fail('invalid')
 
 
-ZERO = MyDecimal()
+class TimeDelta(Field):
+    """A field that (de)serializes a :class:`datetime.timedelta` object to an
+    integer and vice versa. The integer can represent the number of days,
+    seconds or microseconds.
 
+    :param str precision: Influences how the integer is interpreted during
+        (de)serialization. Must be 'days', 'seconds' or 'microseconds'.
+    :param str error: Error message stored upon validation failure.
+    :param kwargs: The same keyword arguments that :class:`Field` receives.
 
-class Fixed(Number):
-    """A fixed-precision number as a string.
+    .. versionchanged:: 2.0.0
+        Always serializes to an integer value to avoid rounding errors.
+        Add `precision` parameter.
     """
 
-    def __init__(self, decimals=5, default=0, attribute=None, error=None,
-                 *args, **kwargs):
-        super(Fixed, self).__init__(default=default, attribute=attribute, error=error,
-                            *args, **kwargs)
-        self.precision = MyDecimal('0.' + '0' * (decimals - 1) + '1')
+    DAYS = 'days'
+    SECONDS = 'seconds'
+    MICROSECONDS = 'microseconds'
 
-    @validated
-    def format(self, value):
-        dvalue = utils.float_to_decimal(float(value))
-        if not dvalue.is_normal() and dvalue != ZERO:
-            raise MarshallingError('Invalid Fixed precision number.')
-        return text_type(dvalue.quantize(self.precision, rounding=ROUND_HALF_EVEN))
+    default_error_messages = {
+        'invalid': 'Not a valid period of time.',
+        'format': '{input!r} cannot be formatted as a timedelta.'
+    }
+
+    def __init__(self, precision='seconds', error=None, **kwargs):
+        precision = precision.lower()
+        units = (self.DAYS, self.SECONDS, self.MICROSECONDS)
+
+        if precision not in units:
+            msg = 'The precision must be "{0}", "{1}" or "{2}".'.format(*units)
+            raise ValueError(msg)
+
+        self.precision = precision
+        super(TimeDelta, self).__init__(error=error, **kwargs)
+
+    def _serialize(self, value, attr, obj):
+        if value is None:
+            return None
+        try:
+            days = value.days
+            if self.precision == self.DAYS:
+                return days
+            else:
+                seconds = days * 86400 + value.seconds
+                if self.precision == self.SECONDS:
+                    return seconds
+                else:  # microseconds
+                    return seconds * 10**6 + value.microseconds  # flake8: noqa
+        except AttributeError:
+            self.fail('format', input=value)
+
+    def _deserialize(self, value, attr, data):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            self.fail('invalid')
+
+        kwargs = {self.precision: value}
+
+        try:
+            return dt.timedelta(**kwargs)
+        except OverflowError:
+            self.fail('invalid')
 
 
-class Price(Fixed):
-    def __init__(self, decimals=2, **kwargs):
-        super(Price, self).__init__(decimals=decimals, **kwargs)
+class Dict(Field):
+    """A dict field. Supports dicts and dict-like objects.
+
+    .. note::
+        This field is only appropriate when the structure of
+        nested data is not known. For structured data, use
+        `Nested`.
+
+    .. versionadded:: 2.1.0
+    """
+
+    default_error_messages = {
+        'invalid': 'Not a valid mapping type.'
+    }
+
+    def _deserialize(self, value, attr, data):
+        if isinstance(value, collections.Mapping):
+            return value
+        else:
+            self.fail('invalid')
 
 
-class Url(Raw):
-    """A validated URL field.
+class ValidatedField(Field):
+    """A field that validates input on serialization."""
+
+    def _validated(self, value):
+        raise NotImplementedError('Must implement _validate method')
+
+    def _serialize(self, value, *args, **kwargs):
+        ret = super(ValidatedField, self)._serialize(value, *args, **kwargs)
+        return self._validated(ret)
+
+
+class Url(ValidatedField, String):
+    """A validated URL field. Validation occurs during both serialization and
+    deserialization.
 
     :param default: Default value for the field if the attribute is not set.
     :param str attribute: The name of the attribute to get the value from. If
-        ``None``, assumes the attribute has the same name as the field.
+        `None`, assumes the attribute has the same name as the field.
     :param bool relative: Allow relative URLs.
+    :param kwargs: The same keyword arguments that :class:`String` receives.
     """
-    def __init__(self, default=None, attribute=None, relative=False, *args, **kwargs):
-        super(Url, self).__init__(default=default, attribute=attribute,
-                *args, **kwargs)
+    default_error_messages = {'invalid': 'Not a valid URL.'}
+
+    def __init__(self, relative=False, **kwargs):
+        String.__init__(self, **kwargs)
         self.relative = relative
+        # Insert validation into self.validators so that multiple errors can be
+        # stored.
+        self.validators.insert(0, validate.URL(
+            relative=self.relative,
+            error=self.error_messages['invalid']
+        ))
 
-    @validated
-    def output(self, key, obj):
-        value = self.get_value(key, obj)
+    def _validated(self, value):
         if value is None:
-            return self.default
-        return validate.url(value, relative=self.relative)
+            return None
+        return validate.URL(
+            relative=self.relative,
+            error=self.error_messages['invalid']
+        )(value)
 
 
-class Email(Raw):
-    """A validated email field.
+class Email(ValidatedField, String):
+    """A validated email field. Validation occurs during both serialization and
+    deserialization.
+
+    :param args: The same positional arguments that :class:`String` receives.
+    :param kwargs: The same keyword arguments that :class:`String` receives.
     """
+    default_error_messages = {'invalid': 'Not a valid email address.'}
+    def __init__(self, *args, **kwargs):
+        String.__init__(self, *args, **kwargs)
+        # Insert validation into self.validators so that multiple errors can be
+        # stored.
+        self.validators.insert(0, validate.Email(error=self.error_messages['invalid']))
 
-    @validated
-    def output(self, key, obj):
-        value = self.get_value(key, obj)
+    def _validated(self, value):
         if value is None:
-            return self.default
-        return validate.email(value)
+            return None
+        return validate.Email(
+            error=self.error_messages['invalid']
+        )(value)
 
 
-def get_args(func):
-    """Return a tuple of argument names for a function."""
-    return inspect.getargspec(func).args
+class Method(Field):
+    """A field that takes the value returned by a `Schema` method.
 
-
-def _callable(obj):
-    """Checks that an object is callable, else raises a ``MarshallingError``.
-    """
-    if not callable(obj):
-        raise MarshallingError('Object {0!r} is not callable.'.format(obj))
-    return obj
-
-
-class Method(Raw):
-    """A field that takes the value returned by a Serializer method.
-
-    :param str method_name: The name of the Serializer method from which
-        to retrieve the value. The method must take a single argument ``obj``
+    :param str method_name: The name of the Schema method from which
+        to retrieve the value. The method must take an argument ``obj``
         (in addition to self) that is the object to be serialized.
-    """
+    :param str deserialize: Optional name of the Schema method for deserializing
+        a value The method must take a single argument ``value``, which is the
+        value to deserialize.
 
-    def __init__(self, method_name, **kwargs):
-        self.method_name = method_name
+    .. versionchanged:: 2.0.0
+        Removed optional ``context`` parameter on methods. Use ``self.context`` instead.
+    .. versionchanged:: 2.3.0
+        Deprecated ``method_name`` parameter in favor of ``serialize`` and allow
+        ``serialize`` to not be passed at all.
+    """
+    _CHECK_ATTRIBUTE = False
+
+    def __init__(self, serialize=None, deserialize=None, method_name=None, **kwargs):
+        if method_name is not None:
+            warnings.warn('"method_name" argument of fields.Method is deprecated. '
+                          'Use the "serialize" argument instead.', DeprecationWarning)
+
+        self.serialize_method_name = self.method_name = serialize or method_name
+        self.deserialize_method_name = deserialize
         super(Method, self).__init__(**kwargs)
 
-    @validated
-    def output(self, key, obj):
+    def _serialize(self, value, attr, obj):
+        if not self.serialize_method_name:
+            return missing_
+
+        method = utils.callable_or_raise(
+            getattr(self.parent, self.serialize_method_name, None)
+        )
         try:
-            method = _callable(getattr(self.parent, self.method_name, None))
-            if len(get_args(method)) > 2:
-                if self.parent.context is None:
-                    msg = 'No context available for Method field {0!r}'.format(key)
-                    raise MarshallingError(msg)
-                return method(obj, self.parent.context)
-            else:
-                return method(obj)
+            return method(obj)
         except AttributeError:
             pass
+        return missing_
+
+    def _deserialize(self, value, attr, data):
+        if self.deserialize_method_name:
+            try:
+                method = utils.callable_or_raise(
+                    getattr(self.parent, self.deserialize_method_name, None)
+                )
+                return method(value)
+            except AttributeError:
+                pass
+        return value
 
 
-class Function(Raw):
+class Function(Field):
     """A field that takes the value returned by a function.
 
-    :param function func: A callable function from which to retrieve the value.
+    :param callable serialize: A callable from which to retrieve the value.
         The function must take a single argument ``obj`` which is the object
-        to be serialized.
+        to be serialized. It can also optionally take a ``context`` argument,
+        which is a dictionary of context variables passed to the serializer.
+        If no callable is provided then the ```load_only``` flag will be set
+        to True.
+    :param callable deserialize: A callable from which to retrieve the value.
+        The function must take a single argument ``value`` which is the value
+        to be deserialized. It can also optionally take a ``context`` argument,
+        which is a dictionary of context variables passed to the deserializer.
+        If no callable is provided then ```value``` will be passed through
+        unchanged.
+    :param callable func: This argument is to be deprecated. It exists for
+        backwards compatiblity. Use serialize instead.
+
+    .. versionchanged:: 2.3.0
+        Deprecated ``func`` parameter in favor of ``serialize``.
     """
+    _CHECK_ATTRIBUTE = False
 
-    def __init__(self, func, **kwargs):
+    def __init__(self, serialize=None, deserialize=None, func=None, **kwargs):
+        if func:
+            warnings.warn('"func" argument of fields.Function is deprecated. '
+                          'Use the "serialize" argument instead.', DeprecationWarning)
+            serialize = func
         super(Function, self).__init__(**kwargs)
-        self.func = _callable(func)
+        self.serialize_func = self.func = serialize and utils.callable_or_raise(serialize)
+        self.deserialize_func = deserialize and utils.callable_or_raise(deserialize)
 
-    @validated
-    def output(self, key, obj):
+    def _serialize(self, value, attr, obj):
         try:
-            if len(get_args(self.func)) > 1:
-                if self.parent.context is None:
-                    msg = 'No context available for Function field {0!r}'.format(key)
-                    raise MarshallingError(msg)
-                return self.func(obj, self.parent.context)
-            else:
-                return self.func(obj)
-        except TypeError as te:  # Function is not callable
-            raise MarshallingError(te)
+            return self._call_or_raise(self.serialize_func, obj, attr)
         except AttributeError:  # the object is not expected to have the attribute
             pass
+        return missing_
 
-
-class Select(Raw):
-    """A field that only lets you set values in the selection.
-
-    :param choices: A list of valid values.
-    :param default: Default value for the field if the attribute is not set.
-    :param str attribute: The name of the attribute to get the value from. If
-        ``None``, assumes the attribute has the same name as the field.
-    :param str error: Error message stored upon validation failure.
-    """
-    def __init__(self,  choices, default=None, attribute=None, error=None, **kwargs):
-        self.choices = choices
-        return super(Select, self).__init__(default, attribute, error, **kwargs)
-
-    def format(self, value):
-        if value not in self.choices:
-            raise MarshallingError("'%s' is not a valid choice for this field." % value)
+    def _deserialize(self, value, attr, data):
+        if self.deserialize_func:
+            return self._call_or_raise(self.deserialize_func, value, attr)
         return value
+
+    def _call_or_raise(self, func, value, attr):
+        if len(utils.get_func_args(func)) > 1:
+            if self.parent.context is None:
+                msg = 'No context available for Function field {0!r}'.format(attr)
+                raise ValidationError(msg)
+            return func(value, self.parent.context)
+        else:
+            return func(value)
+
+
+
+class Constant(Field):
+    """A field that (de)serializes to a preset constant.  If you only want the
+    constant added for serialization or deserialization, you should use
+    ``dump_only=True`` or ``load_only=True`` respectively.
+
+    :param constant: The constant to return for the field attribute.
+
+    .. versionadded:: 2.0.0
+    """
+    _CHECK_ATTRIBUTE = False
+
+    def __init__(self, constant, **kwargs):
+        super(Constant, self).__init__(**kwargs)
+        self.constant = constant
+        self.missing = constant
+        self.default = constant
+
+    def _serialize(self, value, *args, **kwargs):
+        return self.constant
+
+    def _deserialize(self, value, *args, **kwargs):
+        return self.constant
+
+
+# Aliases
+URL = Url
+Str = String
+Bool = Boolean
+Int = Integer

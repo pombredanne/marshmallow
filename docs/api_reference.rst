@@ -6,14 +6,19 @@ API Reference
 
 .. module:: marshmallow
 
-Core
-====
+Schema
+======
 
-.. autoclass:: Serializer
+
+.. autoclass:: marshmallow.Schema
     :inherited-members:
 
-.. autofunction:: pprint
+.. autoclass:: marshmallow.SchemaOpts
 
+.. autoclass:: marshmallow.MarshalResult
+.. autoclass:: marshmallow.UnmarshalResult
+
+.. autofunction:: marshmallow.pprint
 
 .. _api_fields:
 
@@ -21,6 +26,13 @@ Fields
 ======
 
 .. automodule:: marshmallow.fields
+    :members:
+    :private-members:
+
+Decorators
+==========
+
+.. automodule:: marshmallow.decorators
     :members:
 
 Validators
@@ -35,13 +47,21 @@ Utility Functions
 .. automodule:: marshmallow.utils
     :members:
 
+Marshalling
+===========
 
+.. automodule:: marshmallow.marshalling
+    :members:
+    :private-members:
+
+Class Registry
+==============
+
+.. automodule:: marshmallow.class_registry
+    :members:
 
 Exceptions
 ==========
 
-.. module:: marshmallow.exceptions
-
-.. autoexception:: MarshmallowError
-.. autoexception:: MarshallingError
-
+.. automodule:: marshmallow.exceptions
+    :members:

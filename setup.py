@@ -3,13 +3,12 @@
 import re
 from setuptools import setup, find_packages
 
-TEST_REQUIREMENTS = ['unittest2', 'nose', 'pytz']
-
+EXTRA_REQUIREMENTS = ['python-dateutil', 'simplejson']
 
 def find_version(fname):
-    '''Attempts to find the version number in the file names fname.
+    """Attempts to find the version number in the file names fname.
     Raises RuntimeError if not found.
-    '''
+    """
     version = ''
     with open(fname, 'r') as fp:
         reg = re.compile(r'__version__ = [\'"]([^\'"]*)[\'"]')
@@ -34,29 +33,32 @@ setup(
     name='marshmallow',
     version=__version__,
     description=('A lightweight library for converting complex '
-                'datatypes into native Python datatypes.'),
-    long_description=(read("README.rst") + '\n\n' +
-                        read("HISTORY.rst")),
+                'datatypes to and from native Python datatypes.'),
+    long_description=read('README.rst'),
     author='Steven Loria',
     author_email='sloria1@gmail.com',
-    url='https://github.com/sloria/marshmallow',
-    packages=find_packages(exclude=("test*", )),
+    url='https://github.com/marshmallow-code/marshmallow',
+    packages=find_packages(exclude=('test*', 'examples')),
     package_dir={'marshmallow': 'marshmallow'},
     include_package_data=True,
-    tests_require=TEST_REQUIREMENTS,
-    license=read("LICENSE"),
+    extras_require={'reco': EXTRA_REQUIREMENTS},
+    license='MIT',
     zip_safe=False,
-    keywords=('serialization', "rest", "json", "api", "marshal", "marshalling"),
+    keywords=('serialization', 'rest', 'json', 'api', 'marshal',
+        'marshalling', 'deserialization', 'validation', 'schema'),
     classifiers=[
-        'Development Status :: 3 - Alpha',
+        'Development Status :: 5 - Production/Stable',
         'Intended Audience :: Developers',
         'License :: OSI Approved :: MIT License',
-        'Natural Language :: English',
-        "Programming Language :: Python :: 2",
+        'Programming Language :: Python :: 2',
         'Programming Language :: Python :: 2.6',
         'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.3',
+        'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: Implementation :: CPython',
+        'Programming Language :: Python :: Implementation :: PyPy',
     ],
-    test_suite='tests',
+    test_suite='tests'
 )

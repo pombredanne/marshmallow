@@ -1,25 +1,33 @@
-**marshmallow** is an ORM/ODM/framework-agnostic library for converting complex datatypes, such as objects, into native Python datatypes. The serialized objects can then be rendered to standard formats such as JSON for use in a REST API.
+**marshmallow** is an ORM/ODM/framework-agnostic library for converting complex datatypes, such as objects, to and from native Python datatypes.
 
 .. code-block:: python
 
-    from datetime import datetime
-    from marshmallow import Serializer, fields, pprint
+    from datetime import date
+    from marshmallow import Schema, fields, pprint
 
-    # A "model"
-    class Person(object):
-        def __init__(self, name):
-            self.name = name
-            self.date_born = datetime.now()
+    class ArtistSchema(Schema):
+        name = fields.Str()
 
-    # A serializer
-    class PersonSerializer(Serializer):
-        name = fields.String()
-        date_born = fields.DateTime()
+    class AlbumSchema(Schema):
+        title = fields.Str()
+        release_date = fields.Date()
+        artist = fields.Nested(ArtistSchema)
 
-    person = Person("Guido van Rossum")
-    serialized = PersonSerializer(person)
-    pprint(serialized.data)
-    # {"name": "Guido van Rossum", "date_born": "Sun, 10 Nov 2013 14:24:50 -0000"}
+    bowie = dict(name='David Bowie')
+    album = dict(artist=bowie, title='Hunky Dory', release_date=date(1971, 12, 17))
+
+    schema = AlbumSchema()
+    result = schema.dump(album)
+    pprint(result.data, indent=2)
+    # { 'artist': {'name': 'David Bowie'},
+    #   'release_date': '1971-12-17',
+    #   'title': 'Hunky Dory'}
+
+In short, marshmallow schemas can be used to:
+
+- **Validate** input data.
+- **Deserialize** input data to app-level objects.
+- **Serialize** app-level objects to primitive Python types. The serialized objects can then be rendered to standard formats such as JSON for use in an HTTP API.
 
 
 Get It Now

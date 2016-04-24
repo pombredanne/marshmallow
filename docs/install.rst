@@ -5,27 +5,46 @@ Installation
 
 **marshmallow** requires Python >= 2.6 or >= 3.3. It has no external dependencies other than the Python standard library.
 
-To install from the PyPI:
+.. note::
+
+    The `python-dateutil <https://pypi.python.org/pypi/python-dateutil>`_ package is not a hard dependency, but it is recommended for robust datetime deserialization.
+
+    ::
+
+        $ pip install python-dateutil
+
+Installing/Upgrading from the PyPI
+----------------------------------
+
+To install the latest stable version from the PyPI:
 
 ::
 
     $ pip install -U marshmallow
 
-Alternatively, you can install marshmallow from source.
+To install the latest pre-release version from the PyPI:
 
-You can clone the public repo: ::
+::
 
-    $ git clone https://github.com/sloria/marshmallow.git
+    $ pip install -U marshmallow --pre
 
-Or download one of the following:
 
-* tarball_
-* zipball_
+To install marshmallow with the recommended soft dependencies:
 
-Once you have the source, you can install it into your site-packages with ::
+::
 
-    $ python setup.py install
+    $ pip install -U marshmallow[reco]
 
-.. _Github: https://github.com/sloria/marshmallow
-.. _tarball: https://github.com/sloria/marshmallow/tarball/master
-.. _zipball: https://github.com/sloria/marshmallow/zipball/master
+Get the Bleeding Edge Version
+-----------------------------
+
+To get the latest development version of marshmallow, run
+
+::
+
+    $ pip install -U git+https://github.com/marshmallow-code/marshmallow.git@dev
+
+
+.. seealso::
+
+    Need help upgrading to newer releases? See the :ref:`Upgrading to Newer Releases <upgrading>` page.

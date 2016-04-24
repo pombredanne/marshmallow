@@ -1,19 +1,21 @@
 # Config file for automatic testing at travis-ci.org
 
 language: python
-
+# http://blog.travis-ci.com/2014-12-17-faster-builds-with-container-based-infrastructure/
+sudo: false
 python:
+  - "3.5"
+  - "3.4"
   - "3.3"
   - "2.7"
   - "2.6"
+  - "pypy"
 
 before_install:
-  - if [[ $TRAVIS_PYTHON_VERSION == '2.6' ]]; then pip install unittest2; fi
-  - if [[ $TRAVIS_PYTHON_VERSION == '2.7' ]]; then pip install unittest2; fi
-  - if [[ $TRAVIS_PYTHON_VERSION == '3.3' ]]; then pip install unittest2py3k; fi
+  - pip install -U pip
 
 install:
-  - pip install pytz
-  - pip install -U .
+  - pip install -U .[reco]
+  - pip install -U -r dev-requirements.txt
 
-script: nosetests
+script: invoke test

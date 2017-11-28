@@ -21,7 +21,7 @@ To create a custom field class, create a subclass of :class:`marshmallow.fields.
 
     from marshmallow import fields
 
-    class Titlecased(fields.Field):
+    class TitleCased(fields.Field):
         def _serialize(self, value, attr, obj):
             if value is None:
                 return ''
@@ -123,7 +123,7 @@ As an example, you might want your ``UserSchema`` to output whether or not a ``U
 Customizing Error Messages
 --------------------------
 
-Validation error messages for fields can be configured a the class or instance level.
+Validation error messages for fields can be configured at the class or instance level.
 
 At the class level, default error messages are defined as a mapping from error codes to error messages.
 

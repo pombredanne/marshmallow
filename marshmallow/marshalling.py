@@ -10,7 +10,7 @@ and from primitive types.
 
 from __future__ import unicode_literals
 
-from marshmallow.utils import is_collection, missing
+from marshmallow.utils import is_collection, missing, set_value
 from marshmallow.compat import text_type, iteritems
 from marshmallow.exceptions import (
     ValidationError,
@@ -42,6 +42,7 @@ class ErrorStore(object):
         self.errors = {}
         self.error_field_names = []
         self.error_fields = []
+        self.error_kwargs = {}
 
     def get_errors(self, index=None):
         if index is not None:
@@ -247,8 +248,8 @@ class Unmarshaller(ErrorStore):
                 )
             return ret
         if data is not None:
-            items = []
             partial_is_collection = is_collection(partial)
+            ret = dict_class()
             for attr_name, field_obj in iteritems(fields_dict):
                 if field_obj.dump_only:
                     continue
@@ -295,8 +296,7 @@ class Unmarshaller(ErrorStore):
                 )
                 if value is not missing:
                     key = fields_dict[attr_name].attribute or attr_name
-                    items.append((key, value))
-            ret = dict_class(items)
+                    set_value(ret, key, value)
         else:
             ret = None
 

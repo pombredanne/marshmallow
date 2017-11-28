@@ -78,6 +78,15 @@ class TestField:
         result = MySchema().dump({'name': 'Monty', 'foo': 42})
         assert result.data == {'_NaMe': 'Monty'}
 
+    def test_number_fields_prohbits_boolean(self):
+        strict_field = fields.Float()
+        with pytest.raises(ValidationError) as excinfo:
+            strict_field.serialize('value', {'value': False})
+        assert excinfo.value.args[0] == 'Not a valid number.'
+        with pytest.raises(ValidationError) as excinfo:
+            strict_field.serialize('value', {'value': True})
+        assert excinfo.value.args[0] == 'Not a valid number.'
+
 class TestParentAndName:
     class MySchema(Schema):
         foo = fields.Field()
@@ -92,6 +101,17 @@ class TestParentAndName:
         assert schema.fields['foo'].name == 'foo'
         assert schema.fields['bar'].parent == schema
         assert schema.fields['bar'].name == 'bar'
+
+    # https://github.com/marshmallow-code/marshmallow/pull/572#issuecomment-275800288
+    def test_unbound_field_root_returns_none(self):
+        field = fields.Str()
+        assert field.root is None
+
+        inner_field = fields.Nested(self.MySchema())
+        outer_field = fields.List(inner_field)
+
+        assert outer_field.root is None
+        assert inner_field.root is None
 
     def test_list_field_inner_parent_and_name(self, schema):
         assert schema.fields['bar'].container.parent == schema.fields['bar']

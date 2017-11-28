@@ -42,38 +42,50 @@ class URL(Validator):
         Can be interpolated with `{input}`.
     :param set schemes: Valid schemes. By default, ``http``, ``https``,
         ``ftp``, and ``ftps`` are allowed.
+    :param bool require_tld: Whether to reject non-FQDN hostnames
     """
 
-    URL_REGEX = re.compile(
-        r'^(?:[a-z0-9\.\-\+]*)://'  # scheme is validated separately
-        r'(?:[^:@]+?:[^:@]*?@|)'  # basic auth
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+'
-        r'(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'  # domain...
-        r'localhost|'  # localhost...
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|'  # ...or ipv4
-        r'\[?[A-F0-9]*:[A-F0-9:]+\]?)'  # ...or ipv6
-        r'(?::\d+)?'  # optional port
-        r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+    class RegexMemoizer(object):
 
-    RELATIVE_URL_REGEX = re.compile(
-        r'^((?:[a-z0-9\.\-\+]*)://'  # scheme is validated separately
-        r'(?:[^:@]+?:[^:@]*?@|)'  # basic auth
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+'
-        r'(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'  # domain...
-        r'localhost|'  # localhost...
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|'  # ...or ipv4
-        r'\[?[A-F0-9]*:[A-F0-9:]+\]?)'  # ...or ipv6
-        r'(?::\d+)?)?'  # optional port
-        r'(?:/?|[/?]\S+)$', re.IGNORECASE)  # host is optional, allow for relative URLs
+        def __init__(self):
+            self._memoized = {}
+
+        def _regex_generator(self, relative, require_tld):
+            return re.compile(r''.join((
+                r'^',
+                r'(' if relative else r'',
+                r'(?:[a-z0-9\.\-\+]*)://',  # scheme is validated separately
+                r'(?:[^:@]+?:[^:@]*?@|)',  # basic auth
+                r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+',
+                r'(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|',  # domain...
+                r'localhost|',  # localhost...
+                (r'(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.?)|'
+                 if not require_tld else r''),  # allow dotless hostnames
+                r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|',  # ...or ipv4
+                r'\[?[A-F0-9]*:[A-F0-9:]+\]?)',  # ...or ipv6
+                r'(?::\d+)?',  # optional port
+                r')?' if relative else r'',  # host is optional, allow for relative URLs
+                r'(?:/?|[/?]\S+)$',
+            )), re.IGNORECASE)
+
+        def __call__(self, relative, require_tld):
+            key = (relative, require_tld)
+            if key not in self._memoized:
+                self._memoized[key] = self._regex_generator(relative, require_tld)
+
+            return self._memoized[key]
+
+    _regex = RegexMemoizer()
 
     default_message = 'Not a valid URL.'
     default_schemes = set(['http', 'https', 'ftp', 'ftps'])
 
     # TODO; Switch position of `error` and `schemes` in 3.0
-    def __init__(self, relative=False, error=None, schemes=None):
+    def __init__(self, relative=False, error=None, schemes=None, require_tld=True):
         self.relative = relative
         self.error = error or self.default_message
         self.schemes = schemes or self.default_schemes
+        self.require_tld = require_tld
 
     def _repr_args(self):
         return 'relative={0!r}'.format(self.relative)
@@ -92,7 +104,7 @@ class URL(Validator):
             if scheme not in self.schemes:
                 raise ValidationError(message)
 
-        regex = self.RELATIVE_URL_REGEX if self.relative else self.URL_REGEX
+        regex = self._regex(self.relative, self.require_tld)
 
         if not regex.search(value):
             raise ValidationError(message)
@@ -198,7 +210,7 @@ class Range(Validator):
         return value
 
 
-class Length(Range):
+class Length(Validator):
     """Validator which succeeds if the value passed to it has a
     length between a minimum and maximum. Uses len(), so it
     can work for strings, lists, or anything with length.
@@ -225,7 +237,9 @@ class Length(Range):
                 'minimum parameter must not be provided.'
             )
 
-        super(Length, self).__init__(min, max, error)
+        self.min = min
+        self.max = max
+        self.error = error
         self.equal = equal
 
     def _repr_args(self):
@@ -435,11 +449,18 @@ class OneOf(Validator):
 
 class ContainsOnly(OneOf):
     """Validator which succeeds if ``value`` is a sequence and each element
-    in the sequence is also in the sequence passed as ``choices``.
+    in the sequence is also in the sequence passed as ``choices``. Empty input
+    is considered valid.
 
     :param iterable choices: Same as :class:`OneOf`.
     :param iterable labels: Same as :class:`OneOf`.
     :param str error: Same as :class:`OneOf`.
+
+    .. versionchanged:: 3.0.0b2
+        Duplicate values are considered valid.
+    .. versionchanged:: 3.0.0b2
+        Empty input is considered valid. Use `validate.Length(min=1) <marshmallow.validate.Length>`
+        to validate against empty inputs.
     """
 
     default_message = 'One or more of the choices you made was not acceptable.'
@@ -449,19 +470,8 @@ class ContainsOnly(OneOf):
         return super(ContainsOnly, self)._format_error(value_text)
 
     def __call__(self, value):
-        choices = list(self.choices)
-
-        if not value and choices:
-            raise ValidationError(self._format_error(value))
-
-        # We check list.index instead of using set.issubset so that
-        # unhashable types are handled.
+        # We can't use set.issubset because does not handle unhashable types
         for val in value:
-            try:
-                index = choices.index(val)
-            except ValueError:
+            if val not in self.choices:
                 raise ValidationError(self._format_error(value))
-            else:
-                del choices[index]
-
         return value
